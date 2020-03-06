@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 """Provides data for the ImageNet ILSVRC 2012 Dataset plus some bounding boxes.
 
 Some images have one or more bounding boxes associated with the label of the
@@ -37,10 +41,6 @@ Working only on validation data so split is going to be 50k, 5k, 5k
 TODO: check if we can have train, val and test dataset in one go
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 from six.moves import urllib
 import tensorflow as tf
@@ -54,8 +54,8 @@ slim = contrib_slim
 _FILE_PATTERN = "%s-*"
 
 _SPLITS_TO_SIZES = {
-    "train": 50000,
-    "validation": 10000,
+    # "train": 50000,
+    "validation": 60000,
 }
 
 _ITEMS_TO_DESCRIPTIONS = {
