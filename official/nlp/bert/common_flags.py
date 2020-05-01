@@ -20,6 +20,14 @@ import tensorflow as tf
 from official.utils.flags import core as flags_core
 
 
+def define_gin_flags():
+  """Define common gin configurable flags."""
+  flags.DEFINE_multi_string('gin_file', None,
+                            'List of paths to the config files.')
+  flags.DEFINE_multi_string(
+      'gin_param', None, 'Newline separated list of Gin parameter bindings.')
+
+
 def define_common_bert_flags():
   """Define common flags for BERT tasks."""
   flags_core.define_base(
@@ -49,7 +57,7 @@ def define_common_bert_flags():
   flags.DEFINE_integer('num_train_epochs', 3,
                        'Total number of training epochs to perform.')
   flags.DEFINE_integer(
-      'steps_per_loop', 200,
+      'steps_per_loop', 1,
       'Number of steps per graph-mode loop. Only training step '
       'happens inside the loop. Callbacks will not be called '
       'inside.')
@@ -68,6 +76,8 @@ def define_common_bert_flags():
       'If specified, init_checkpoint flag should not be used.')
   flags.DEFINE_bool('hub_module_trainable', True,
                     'True to make keras layers in the hub module trainable.')
+  flags.DEFINE_string('optimizer_type', 'adamw',
+                      'The type of optimizer to use for training (adamw|lamb)')
 
   flags_core.define_log_steps()
 

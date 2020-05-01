@@ -53,7 +53,7 @@ tf.app.flags.DEFINE_string(
 )
 
 tf.app.flags.DEFINE_string(
-    "dataset_split_name", "test", "The name of the train/test split."
+    "dataset_split_name", "validation", "The name of the train/test split."
 )
 
 tf.app.flags.DEFINE_string(
@@ -202,12 +202,13 @@ def main(_):
             checkpoint_path = FLAGS.checkpoint_path
 
         tf.logging.info("Evaluating %s" % checkpoint_path)
-
+        session_config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))
         slim.evaluation.evaluate_once(
             master=FLAGS.master,
             checkpoint_path=checkpoint_path,
             logdir=FLAGS.eval_dir,
             num_evals=num_batches,
+            session_config=session_config,
             eval_op=list(names_to_updates.values()),
             variables_to_restore=variables_to_restore,
         )

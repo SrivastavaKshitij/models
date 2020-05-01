@@ -25,8 +25,6 @@ from absl import app
 from absl import flags
 from absl import logging
 import tensorflow as tf
-
-from official.modeling import model_training_utils
 from official.modeling import performance
 from official.nlp import optimization
 from official.nlp.bert import bert_models
@@ -34,6 +32,7 @@ from official.nlp.bert import common_flags
 from official.nlp.bert import configs as bert_configs
 from official.nlp.bert import input_pipeline
 from official.nlp.bert import model_saving_utils
+from official.nlp.bert import model_training_utils
 from official.utils.misc import distribution_utils
 from official.utils.misc import keras_utils
 
@@ -61,7 +60,7 @@ common_flags.define_common_bert_flags()
 FLAGS = flags.FLAGS
 
 
-def get_loss_fn(num_classes, loss_factor=1.0):
+def get_loss_fn(num_classes):
   """Gets the classification loss function."""
 
   def classification_loss_fn(labels, logits):
@@ -72,9 +71,7 @@ def get_loss_fn(num_classes, loss_factor=1.0):
         tf.cast(labels, dtype=tf.int32), depth=num_classes, dtype=tf.float32)
     per_example_loss = -tf.reduce_sum(
         tf.cast(one_hot_labels, dtype=tf.float32) * log_probs, axis=-1)
-    loss = tf.reduce_mean(per_example_loss)
-    loss *= loss_factor
-    return loss
+    return tf.reduce_mean(per_example_loss)
 
   return classification_loss_fn
 
@@ -128,24 +125,15 @@ def run_bert_classifier(strategy,
             hub_module_url=FLAGS.hub_module_url,
             hub_module_trainable=FLAGS.hub_module_trainable))
     optimizer = optimization.create_optimizer(
-        initial_lr, steps_per_epoch * epochs, warmup_steps)
+        initial_lr, steps_per_epoch * epochs, warmup_steps,
+        FLAGS.optimizer_type)
     classifier_model.optimizer = performance.configure_optimizer(
         optimizer,
         use_float16=common_flags.use_float16(),
         use_graph_rewrite=common_flags.use_graph_rewrite())
     return classifier_model, core_model
 
-  # During distributed training, loss used for gradient computation is
-  # summed over from all replicas. When Keras compile/fit() API is used,
-  # the fit() API internally normalizes the loss by dividing the loss by
-  # the number of replicas used for computation. However, when custom
-  # training loop is used this is not done automatically and should be
-  # done manually by the end user.
-  loss_multiplier = 1.0
-  if FLAGS.scale_loss and not use_keras_compile_fit:
-    loss_multiplier = 1.0 / strategy.num_replicas_in_sync
-
-  loss_fn = get_loss_fn(num_classes, loss_factor=loss_multiplier)
+  loss_fn = get_loss_fn(num_classes)
 
   # Defines evaluation metrics function, which will create metrics in the
   # correct device and strategy scope.
@@ -168,6 +156,7 @@ def run_bert_classifier(strategy,
         init_checkpoint,
         epochs,
         steps_per_epoch,
+        steps_per_loop,
         eval_steps,
         custom_callbacks=custom_callbacks)
 
@@ -201,6 +190,7 @@ def run_keras_compile_fit(model_dir,
                           init_checkpoint,
                           epochs,
                           steps_per_epoch,
+                          steps_per_loop,
                           eval_steps,
                           custom_callbacks=None):
   """Runs BERT classifier model using Keras compile/fit API."""
@@ -215,7 +205,11 @@ def run_keras_compile_fit(model_dir,
       checkpoint = tf.train.Checkpoint(model=sub_model)
       checkpoint.restore(init_checkpoint).assert_existing_objects_matched()
 
-    bert_model.compile(optimizer=optimizer, loss=loss_fn, metrics=[metric_fn()])
+    bert_model.compile(
+        optimizer=optimizer,
+        loss=loss_fn,
+        metrics=[metric_fn()],
+        experimental_steps_per_execution=steps_per_loop)
 
     summary_dir = os.path.join(model_dir, 'summaries')
     summary_callback = tf.keras.callbacks.TensorBoard(summary_dir)
@@ -267,7 +261,7 @@ def get_predictions_and_labels(strategy, trained_model, eval_input_fn,
       model_outputs = trained_model(inputs, training=False)
       return model_outputs, labels
 
-    outputs, labels = strategy.experimental_run_v2(
+    outputs, labels = strategy.run(
         _test_step_fn, args=(next(iterator),))
     # outputs: current batch logits as a tuple of shard logits
     outputs = tf.nest.map_structure(strategy.experimental_local_results,
@@ -403,7 +397,6 @@ def run_bert(strategy,
 
 def main(_):
   # Users should always run this script under TF 2.x
-  assert tf.version.VERSION.startswith('2.')
 
   with tf.io.gfile.GFile(FLAGS.input_meta_data_path, 'rb') as reader:
     input_meta_data = json.loads(reader.read().decode('utf-8'))

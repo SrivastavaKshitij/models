@@ -159,6 +159,7 @@ class TransformerTask(object):
     params["enable_tensorboard"] = flags_obj.enable_tensorboard
     params["enable_metrics_in_training"] = flags_obj.enable_metrics_in_training
     params["steps_between_evals"] = flags_obj.steps_between_evals
+    params["enable_checkpointing"] = flags_obj.enable_checkpointing
 
     self.distribution_strategy = distribution_utils.get_distribution_strategy(
         distribution_strategy=flags_obj.distribution_strategy,
@@ -245,6 +246,11 @@ class TransformerTask(object):
 
     callbacks = self._create_callbacks(flags_obj.model_dir, 0, params)
 
+    # Only TimeHistory callback is supported for CTL
+    if params["use_ctl"]:
+      callbacks = [cb for cb in callbacks
+                   if isinstance(cb, keras_utils.TimeHistory)]
+
     # TODO(b/139418525): Refactor the custom training loop logic.
     @tf.function
     def train_steps(iterator, steps):
@@ -279,7 +285,7 @@ class TransformerTask(object):
 
       for _ in tf.range(steps):
         train_loss_metric.reset_states()
-        self.distribution_strategy.experimental_run_v2(
+        self.distribution_strategy.run(
             _step_fn, args=(next(iterator),))
 
     cased_score, uncased_score = None, None
@@ -298,8 +304,13 @@ class TransformerTask(object):
         if not self.use_tpu:
           raise NotImplementedError(
               "Custom training loop on GPUs is not implemented.")
+
         # Runs training steps.
         with summary_writer.as_default():
+          for cb in callbacks:
+            cb.on_epoch_begin(current_iteration)
+            cb.on_batch_begin(0)
+
           train_steps(
               train_ds_iterator,
               tf.convert_to_tensor(train_steps_per_eval, dtype=tf.int32))
@@ -308,15 +319,25 @@ class TransformerTask(object):
           logging.info("Train Step: %d/%d / loss = %s", current_step,
                        flags_obj.train_steps, train_loss)
 
+          for cb in callbacks:
+            cb.on_batch_end(train_steps_per_eval - 1)
+            cb.on_epoch_end(current_iteration)
+
           if params["enable_tensorboard"]:
             for metric_obj in train_metrics:
               tf.compat.v2.summary.scalar(metric_obj.name, metric_obj.result(),
                                           current_step)
+              summary_writer.flush()
 
-        checkpoint_name = checkpoint.save(
-            os.path.join(flags_obj.model_dir,
-                         "ctl_step_{}.ckpt".format(current_step)))
-        logging.info("Saved checkpoint to %s", checkpoint_name)
+        for cb in callbacks:
+          cb.on_train_end()
+
+        if flags_obj.enable_checkpointing:
+          # avoid check-pointing when running for benchmarking.
+          checkpoint_name = checkpoint.save(
+              os.path.join(flags_obj.model_dir,
+                           "ctl_step_{}.ckpt".format(current_step)))
+          logging.info("Saved checkpoint to %s", checkpoint_name)
       else:
         if self.use_tpu:
           raise NotImplementedError(
@@ -397,10 +418,11 @@ class TransformerTask(object):
     scheduler_callback = optimizer.LearningRateScheduler(sfunc, init_steps)
     callbacks = misc.get_callbacks(params["steps_between_evals"])
     callbacks.append(scheduler_callback)
-    ckpt_full_path = os.path.join(cur_log_dir, "cp-{epoch:04d}.ckpt")
-    callbacks.append(
-        tf.keras.callbacks.ModelCheckpoint(
-            ckpt_full_path, save_weights_only=True))
+    if params["enable_checkpointing"]:
+      ckpt_full_path = os.path.join(cur_log_dir, "cp-{epoch:04d}.ckpt")
+      callbacks.append(
+          tf.keras.callbacks.ModelCheckpoint(
+              ckpt_full_path, save_weights_only=True))
     return callbacks
 
   def _load_weights_if_possible(self, model, init_weight_path=None):
@@ -470,7 +492,6 @@ def main(_):
 
 
 if __name__ == "__main__":
-  tf.compat.v1.enable_v2_behavior()
   logging.set_verbosity(logging.INFO)
   misc.define_transformer_flags()
   app.run(main)
